@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Wrapper Python (sync + async) per le API non documentate del registro elettronico DiDUP / Argo Famiglia"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Rocciadura" }]
 keywords = ["didup", "argo", "registro elettronico", "scuola", "api", "wrapper"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
