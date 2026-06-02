@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "didupwrapper"
-version = "0.1.0"
+version = "0.1.1"
 description = "Wrapper Python (sync + async) per le API non documentate del registro elettronico DiDUP / Argo Famiglia"
 readme = "README.md"
 requires-python = ">=3.10"
