@@ -1,8 +1,8 @@
-"""Eccezioni custom della libreria didupwrapper.
+"""Le eccezioni della libreria.
 
-Gli errori HTTP vengono mappati sulle eccezioni qui definite tramite
-:func:`from_response`, in modo che il chiamante possa gestire i vari casi
-(autenticazione, rate limit, risorsa non trovata...) in modo esplicito.
+Quando il server risponde con un errore HTTP, :func:`from_response` lo
+trasforma nell'eccezione giusta, così chi usa la libreria può distinguere
+un problema di login da un rate limit senza dover leggere i codici HTTP.
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ __all__ = [
 
 
 class DiDUPError(Exception):
-    """Errore generico della libreria didupwrapper.
+    """L'errore base della libreria.
 
-    Tutte le altre eccezioni ereditano da questa, quindi un singolo
-    ``except DiDUPError`` cattura qualunque problema sollevato dal wrapper.
+    Tutte le altre eccezioni derivano da questa: se non ti interessa il
+    dettaglio, un ``except DiDUPError`` le prende tutte.
     """
 
     def __init__(
@@ -51,11 +51,11 @@ class DiDUPError(Exception):
 
 
 class AuthError(DiDUPError):
-    """Credenziali mancanti/non valide o sessione scaduta (HTTP 401/403)."""
+    """Credenziali sbagliate o mancanti, oppure sessione scaduta (HTTP 401/403)."""
 
 
 class RateLimitError(DiDUPError):
-    """Troppe richieste verso il server DiDUP (HTTP 429)."""
+    """Stai facendo troppe richieste: rallenta (HTTP 429)."""
 
     def __init__(self, *args: Any, retry_after: float | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -63,15 +63,15 @@ class RateLimitError(DiDUPError):
 
 
 class NotFoundError(DiDUPError):
-    """Risorsa o endpoint non trovato (HTTP 404)."""
+    """L'endpoint o la risorsa non esiste (HTTP 404)."""
 
 
 def from_response(response: httpx.Response) -> DiDUPError:
-    """Costruisce l'eccezione adeguata a partire da una risposta HTTP di errore."""
+    """Dato una risposta di errore, restituisce l'eccezione che le corrisponde."""
     status = response.status_code
     url = str(response.request.url) if response.request else None
 
-    # Proviamo a estrarre un messaggio utile dal corpo della risposta.
+    # Se il server ci ha spiegato cosa non va, usiamo il suo messaggio.
     payload: Any
     try:
         payload = response.json()
@@ -84,6 +84,12 @@ def from_response(response: httpx.Response) -> DiDUPError:
         return AuthError(message, status_code=status, payload=payload, request_url=url)
     if status == 404:
         return NotFoundError(message, status_code=status, payload=payload, request_url=url)
+    if status == 410:
+        # Argo risponde 410 quando `argo-client-version` è troppo vecchia.
+        message = (
+            f"{message}. Probabilmente la versione del client è superata: "
+            "prova con auto_versione=True o passa una version più recente."
+        )
     if status == 429:
         retry_after = _parse_retry_after(response.headers.get("Retry-After"))
         return RateLimitError(

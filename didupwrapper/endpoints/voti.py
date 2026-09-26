@@ -1,4 +1,4 @@
-"""Endpoint voti."""
+"""Voti, con filtri per materia, periodo e tipo di prova."""
 
 from __future__ import annotations
 
@@ -33,10 +33,11 @@ class VotiEndpoint(BaseEndpoint):
         return [v for v in await self.lista() if v.is_orale]
 
     async def media_per_materia(self, pk_materia: str) -> float | None:
-        """Media aritmetica dei voti numerici di una materia.
+        """La media semplice dei voti di una materia.
 
-        Vengono inclusi solo i voti con valore numerico e che concorrono
-        alla media (``faMenoMedia is False``).
+        Conta solo i voti che hanno un valore numerico e che fanno media
+        (quelli segnati "fa meno media" restano fuori). Se non ce n'è
+        nessuno restituisce ``None``.
         """
         valori = [
             v.valore

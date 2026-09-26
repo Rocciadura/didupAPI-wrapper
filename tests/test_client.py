@@ -6,11 +6,13 @@ testano così lo step di login applicativo e il parsing della dashboard.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
 
-from didupwrapper import AuthError, DiDUPClient, DiDUPError
+from didupwrapper import AuthError, DashboardPoller, DiDUPClient, DiDUPClientSync, DiDUPError
 from didupwrapper.auth import ArgoConfig
 
 from .test_models import DASHBOARD_JSON
@@ -127,3 +129,92 @@ async def test_success_false_solleva_errore():
     with pytest.raises(DiDUPError):
         async with _client():
             pass
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_versione_superata_410_spiega_il_problema():
+    respx.post(f"{BASE_URL}login").mock(return_value=httpx.Response(410, text=""))
+    with pytest.raises(DiDUPError, match="auto_versione"):
+        async with _client():
+            pass
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_dashboard_vuota_solleva_didup_error():
+    respx.post(f"{BASE_URL}login").mock(
+        return_value=httpx.Response(200, json=LOGIN_RESPONSE)
+    )
+    respx.post(f"{BASE_URL}dashboard/dashboard").mock(
+        return_value=httpx.Response(200, json={"success": True, "data": {"dati": []}})
+    )
+    async with _client() as didup:
+        with pytest.raises(DiDUPError):
+            await didup.get_dashboard()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_risposta_non_json_solleva_didup_error():
+    respx.post(f"{BASE_URL}login").mock(
+        return_value=httpx.Response(200, text="<html>manutenzione</html>")
+    )
+    with pytest.raises(DiDUPError):
+        async with _client():
+            pass
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_login_fallito_chiude_il_client_http():
+    respx.post(f"{BASE_URL}login").mock(return_value=httpx.Response(401))
+    didup = _client()
+    with pytest.raises(AuthError):
+        async with didup:
+            pass
+    assert didup._http.is_closed
+
+
+@respx.mock
+def test_client_sync_login_fallito_chiude_il_loop():
+    respx.post(f"{BASE_URL}login").mock(return_value=httpx.Response(401))
+    didup = DiDUPClientSync(config=CONFIG, access_token="fake-oauth-token")
+    with pytest.raises(AuthError):
+        with didup:
+            pass
+    assert didup._loop.is_closed()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_poller_notifica_solo_le_novita():
+    respx.post(f"{BASE_URL}login").mock(
+        return_value=httpx.Response(200, json=LOGIN_RESPONSE)
+    )
+    route = respx.post(f"{BASE_URL}dashboard/dashboard")
+    route.mock(return_value=httpx.Response(200, json=DASHBOARD_RESPONSE))
+
+    ricevuti: list = []
+
+    def on_voti(nuovi):
+        # Restituisce un Future invece di una coroutine: va comunque atteso.
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(None)
+        ricevuti.extend(nuovi)
+        return fut
+
+    async with _client() as didup:
+        poller = DashboardPoller(didup, on_nuovi_voti=on_voti)
+        await poller.tick()  # primo giro: prende solo nota
+        assert ricevuti == []
+
+        nuovo = {**DASHBOARD_JSON, "voti": DASHBOARD_JSON["voti"] + [
+            {**DASHBOARD_JSON["voti"][0], "datEvento": "2026-05-25", "codCodice": "9"}
+        ]}
+        route.mock(
+            return_value=httpx.Response(200, json={"success": True, "data": {"dati": [nuovo]}})
+        )
+        evento = await poller.tick()
+        assert [v.cod_codice for v in ricevuti] == ["9"]
+        assert evento.ha_novita

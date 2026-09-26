@@ -1,8 +1,8 @@
-"""Poller che monitora la dashboard e notifica le novità.
+"""Un poller che ti avvisa quando sul registro compare qualcosa di nuovo.
 
-Il :class:`DashboardPoller` interroga periodicamente la dashboard, confronta
-il risultato con la rilevazione precedente e invoca le callback registrate
-per ogni nuovo elemento (nuovi voti, comunicazioni, assenze, ecc.).
+:class:`DashboardPoller` riscarica la dashboard a intervalli regolari, la
+confronta con quella del giro prima e chiama le tue callback solo per gli
+elementi nuovi: un voto, una comunicazione, un'assenza e così via.
 
 Esempio::
 
@@ -11,12 +11,13 @@ Esempio::
             print("Nuovo voto:", v.des_materia, v.cod_codice)
 
     poller = DashboardPoller(client, intervallo=600, on_nuovi_voti=on_voti)
-    await poller.avvia()
+    await poller.start()  # gira finché non chiami poller.stop()
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, Hashable, Sequence, TypeVar
@@ -37,13 +38,14 @@ __all__ = ["DashboardPoller", "EventoPoller"]
 logger = logging.getLogger("didupwrapper.poller")
 
 T = TypeVar("T")
-# Una callback può essere sync o async; riceve la lista dei nuovi elementi.
+# Le callback possono essere normali funzioni o coroutine; ricevono la lista
+# degli elementi nuovi.
 Callback = Callable[[list[T]], Awaitable[None] | None]
 
 
 @dataclass
 class EventoPoller:
-    """Risultato di un singolo ciclo di polling: cosa è cambiato."""
+    """Cosa è cambiato in un giro di polling."""
 
     nuovi_voti: list[Voto]
     nuove_assenze: list[EventoAppello]
@@ -65,7 +67,12 @@ class EventoPoller:
 
 
 class DashboardPoller:
-    """Monitora la dashboard a intervalli regolari ed emette eventi di novità."""
+    """Controlla la dashboard ogni ``intervallo`` secondi e ti segnala le novità.
+
+    Al primo giro, di default, si limita a prendere nota di cosa c'è già,
+    così non ricevi una valanga di "novità" appena lo avvii. Se invece vuoi
+    ricevere anche quelle, passa ``emetti_al_primo_giro=True``.
+    """
 
     def __init__(
         self,
@@ -92,7 +99,7 @@ class DashboardPoller:
         self._on_evento = on_evento
         self._emetti_al_primo_giro = emetti_al_primo_giro
 
-        # Insiemi di chiavi già viste, per sezione.
+        # Per ogni sezione, le chiavi degli elementi che abbiamo già visto.
         self._visti: dict[str, set[Hashable]] = {
             "voti": set(),
             "assenze": set(),
@@ -107,13 +114,13 @@ class DashboardPoller:
     # Controllo del ciclo                                                #
     # ------------------------------------------------------------------ #
     async def start(self) -> None:
-        """Avvia il loop di polling fino a :meth:`ferma`."""
+        """Fa partire il polling. Continua finché qualcuno non chiama :meth:`stop`."""
         self._stop.clear()
         logger.info("Poller avviato (intervallo=%ss)", self._intervallo)
         while not self._stop.is_set():
             try:
                 await self.tick()
-            except Exception:  # noqa: BLE001 - il loop non deve morire
+            except Exception:  # noqa: BLE001 - un errore di rete non deve fermare tutto
                 logger.exception("Errore durante il ciclo di polling")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._intervallo)
@@ -122,11 +129,11 @@ class DashboardPoller:
         logger.info("Poller fermato")
 
     def stop(self) -> None:
-        """Richiede l'arresto del loop di polling."""
+        """Ferma il polling (al termine del giro in corso)."""
         self._stop.set()
 
     async def tick(self) -> EventoPoller:
-        """Esegue un singolo ciclo: scarica la dashboard e calcola le novità."""
+        """Un singolo giro: riscarica la dashboard e restituisce le novità trovate."""
         dashboard = await self._client.get_dashboard(forza_refresh=True)
 
         emetti = self._emetti_al_primo_giro or not self._primo_giro
@@ -169,10 +176,10 @@ class DashboardPoller:
         chiave: Callable[[T], Hashable],
         emetti: bool,
     ) -> list[T]:
-        """Aggiorna l'insieme dei visti e ritorna gli elementi nuovi.
+        """Segna come visti gli elementi e restituisce quelli mai visti prima.
 
-        Al primo giro (se ``emetti`` è False) popola soltanto lo stato senza
-        emettere nulla, così da non bombardare di notifiche allo startup.
+        Con ``emetti=False`` (il primo giro) aggiorna solo lo stato e
+        restituisce una lista vuota.
         """
         visti = self._visti[sezione]
         nuovi: list[T] = []
@@ -199,12 +206,13 @@ class DashboardPoller:
 
 
 async def _maybe_await(risultato: Awaitable[None] | None) -> None:
-    if asyncio.iscoroutine(risultato):
+    # isawaitable copre anche Task e Future, non solo le coroutine.
+    if inspect.isawaitable(risultato):
         await risultato
 
 
 # --------------------------------------------------------------------------- #
-# Funzioni-chiave per il deduplicamento                                        #
+# Come riconosciamo un elemento già visto                                      #
 # --------------------------------------------------------------------------- #
 def _chiave_voto(v: Voto) -> Hashable:
     return (v.dat_evento, v.pk_materia, v.cod_codice, v.cod_voto_pratico, v.valore)

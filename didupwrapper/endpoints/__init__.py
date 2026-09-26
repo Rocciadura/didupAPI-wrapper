@@ -1,9 +1,9 @@
-"""Endpoint della libreria.
+"""Gli endpoint: un modo comodo per filtrare le varie sezioni della dashboard.
 
-Ogni endpoint incapsula l'accesso a una sezione della dashboard DiDUP.
-La maggior parte dei dati arriva infatti da un'unica risposta aggregata
-(:class:`~didupwrapper.models.DashboardResponse`); gli endpoint si occupano
-di estrarre e filtrare la porzione di propria competenza.
+Argo manda quasi tutto in un'unica risposta
+(:class:`~didupwrapper.models.DashboardResponse`). Ogni endpoint si occupa di
+una sezione — voti, assenze, bacheca... — e aggiunge qualche filtro già
+pronto, così non devi scriverteli a mano.
 """
 
 from __future__ import annotations
@@ -16,11 +16,7 @@ if TYPE_CHECKING:
 
 
 class BaseEndpoint:
-    """Classe base per tutti gli endpoint.
-
-    Mantiene un riferimento al client async e offre l'accesso comodo alla
-    dashboard (con cache gestita dal client).
-    """
+    """La base comune degli endpoint: tiene il client e sa come chiedergli la dashboard."""
 
     def __init__(self, client: "DiDUPClient") -> None:
         self._client = client
