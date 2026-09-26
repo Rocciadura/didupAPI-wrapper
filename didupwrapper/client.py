@@ -1,20 +1,20 @@
-"""Client DiDUP: implementazione async (:class:`DiDUPClient`) e wrapper
-sincrono (:class:`DiDUPClientSync`).
+"""Il client vero e proprio: :class:`DiDUPClient` (async) e
+:class:`DiDUPClientSync` (la stessa cosa, ma sincrona).
 
-Flusso completo di accesso:
+Per arrivare ai dati servono tre passaggi, gli stessi che fa l'app:
 
-1. OAuth2/PKCE (gestito da :class:`~didupwrapper.auth.Autenticatore`) -> access token
-2. POST ``login`` (appfamiglia) -> ``x-auth-token``, ``codMin``, ``opzioni``
-3. POST ``dashboard/dashboard`` -> dati aggregati, da cui gli endpoint estraggono le sezioni
-
-Tutti i metodi pubblici hanno nome italiano (``get_voti``, ``get_assenze``, ...).
+1. login OAuth2/PKCE sul portale Argo, che ci dà un access token
+   (se ne occupa :class:`~didupwrapper.auth.Autenticatore`);
+2. ``POST login`` sull'API dell'app, che restituisce ``x-auth-token``,
+   ``codMin`` e le ``opzioni`` del profilo;
+3. ``POST dashboard/dashboard``, che manda praticamente tutti i dati in una
+   volta sola. Gli endpoint poi prendono da lì la parte che serve.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import secrets
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Coroutine, TypeVar
 
@@ -25,6 +25,7 @@ from .auth import (
     Autenticatore,
     Credenziali,
     SessioneToken,
+    _random_string,
     formatta_data,
     recupera_versione_app,
 )
@@ -61,16 +62,20 @@ T = TypeVar("T")
 
 _LOGIN_PATH = "login"
 _DASHBOARD_PATH = "dashboard/dashboard"
+# Chiedendo i dati "aggiornati dal 2000" il server ci manda tutto.
 _DATA_INIZIO_DEFAULT = "2000-01-01 00:00:00.000"
-
-_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-
-
-def _random_string(length: int) -> str:
-    return "".join(secrets.choice(_ALPHABET) for _ in range(length))
 
 
 class DiDUPClient:
+    """Client asincrono per DiDUP.
+
+    Il modo più comodo di usarlo è come context manager: all'ingresso fa il
+    login, all'uscita chiude la connessione::
+
+        async with DiDUPClient("SC12345", "mario.rossi", "password") as didup:
+            voti = await didup.get_voti()
+    """
+
     def __init__(
         self,
         codice_scuola: str | None = None,
@@ -116,7 +121,12 @@ class DiDUPClient:
     # Ciclo di vita / context manager                                    #
     # ------------------------------------------------------------------ #
     async def __aenter__(self) -> "DiDUPClient":
-        await self.login()
+        try:
+            await self.login()
+        except BaseException:
+            # Se il login fallisce __aexit__ non viene chiamato: chiudiamo noi.
+            await self.aclose()
+            raise
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -130,14 +140,14 @@ class DiDUPClient:
     # Autenticazione                                                     #
     # ------------------------------------------------------------------ #
     async def login(self) -> None:
-        """Esegue il login completo: OAuth + login applicativo."""
+        """Fa il login completo (OAuth + login dell'app). Se sei già dentro non fa nulla."""
         await self._assicura_versione()
         await self._auth.assicura_sessione(self._http)
         if self._login_data is None:
             await self._login_applicativo()
 
     async def _assicura_versione(self) -> None:
-        """Se richiesto, risolve ``argo-client-version`` dall'ultima versione app."""
+        """Con ``auto_versione=True`` chiede allo store qual è l'ultima versione dell'app."""
         if not self._auto_versione or self._versione_risolta:
             return
         versione = await recupera_versione_app()
@@ -152,7 +162,7 @@ class DiDUPClient:
         return self._config.version
 
     async def _login_applicativo(self) -> dict[str, Any] | None:
-        """Step ``login`` dell'app: ottiene x-auth-token, codMin e opzioni."""
+        """Il ``login`` dell'app: ci restituisce x-auth-token, codMin e opzioni."""
         dati = await self._post(
             _LOGIN_PATH,
             json={
@@ -190,14 +200,30 @@ class DiDUPClient:
         return headers
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        await self._auth.assicura_sessione(self._http)
+        if not self._auth.autenticato:
+            # Il token OAuth è scaduto (o non c'è ancora): ne prendiamo uno nuovo.
+            # Il vecchio x-auth-token era legato alla sessione precedente, quindi
+            # rifacciamo anche il login dell'app.
+            await self._auth.login(self._http)
+            if self._login_data is not None and path != _LOGIN_PATH:
+                self._login_data = None
+                await self._login_applicativo()
         headers = {**self._headers(), **kwargs.pop("headers", {})}
         risposta = await self._http.request(method, path, headers=headers, **kwargs)
         if risposta.is_error:
             raise from_response(risposta)
         if not risposta.content:
             return None
-        return risposta.json()
+        try:
+            return risposta.json()
+        except ValueError as exc:
+            # Capita per esempio con le pagine HTML di manutenzione.
+            raise DiDUPError(
+                "Il server ha risposto con qualcosa che non è JSON",
+                status_code=risposta.status_code,
+                payload=risposta.text,
+                request_url=str(risposta.request.url),
+            ) from exc
 
     async def _post(self, path: str, **kwargs: Any) -> Any:
         return await self._request("POST", path, **kwargs)
@@ -214,7 +240,11 @@ class DiDUPClient:
     # Dashboard                                                          #
     # ------------------------------------------------------------------ #
     async def get_dashboard(self, *, forza_refresh: bool = False) -> DashboardResponse:
-        """Scarica (e mette in cache) la dashboard aggregata."""
+        """Scarica la dashboard e la tiene in cache.
+
+        Le chiamate successive usano la copia in cache; passa
+        ``forza_refresh=True`` se vuoi i dati freschi dal server.
+        """
         if self._dashboard_cache is not None and not forza_refresh:
             return self._dashboard_cache
 
@@ -229,21 +259,25 @@ class DiDUPClient:
             },
         )
         self._verifica_success(dati)
-        dashboard = DashboardResponse.model_validate(_estrai_dashboard(dati))
+        contenuto = _estrai_dashboard(dati)
+        if not isinstance(contenuto, dict):
+            raise DiDUPError("La dashboard è arrivata vuota o in un formato inatteso", payload=dati)
+        dashboard = DashboardResponse.model_validate(contenuto)
         self._dashboard_cache = dashboard
         return dashboard
 
     def _opzioni_serializzate(self) -> str:
-        """Serializza le ``opzioni`` del profilo come si aspetta l'API."""
+        """Le ``opzioni`` del profilo, nel formato stringa JSON che vuole l'API."""
         opzioni = (self._login_data or {}).get("opzioni") or []
         mappa = {o["chiave"]: o["valore"] for o in opzioni if "chiave" in o}
         return json.dumps(mappa, separators=(",", ":"))
 
     def invalida_cache(self) -> None:
+        """Butta la dashboard in cache: la prossima richiesta la riscarica."""
         self._dashboard_cache = None
 
     # ------------------------------------------------------------------ #
-    # Metodi di comodo (nomi italiani)                                   #
+    # Scorciatoie                                                        #
     # ------------------------------------------------------------------ #
     async def get_voti(self) -> list[Voto]:
         return await self.voti.lista()
@@ -286,7 +320,7 @@ class DiDUPClient:
 
 
 def _estrai_dashboard(dati: Any) -> Any:
-    """Normalizza l'incapsulamento ``{"data": {"dati": [ {...} ]}}`` di Argo."""
+    """Tira fuori la dashboard dall'involucro ``{"data": {"dati": [{...}]}}`` di Argo."""
     if not isinstance(dati, dict):
         return dati
     contenuto = dati.get("data", dati)
@@ -299,10 +333,10 @@ def _estrai_dashboard(dati: Any) -> Any:
 
 
 class DiDUPClientSync:
-    """Wrapper sincrono attorno a :class:`DiDUPClient`.
+    """La versione sincrona di :class:`DiDUPClient`, per chi non usa asyncio.
 
-    Mantiene un event loop dedicato così che il client httpx async viva
-    sempre nello stesso loop.
+    Sotto il cofano gira il client async su un event loop tutto suo, sempre
+    lo stesso, così la connessione httpx resta valida tra una chiamata e l'altra.
 
     Esempio::
 
@@ -312,19 +346,29 @@ class DiDUPClientSync:
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._loop = asyncio.new_event_loop()
-        self._async = DiDUPClient(*args, **kwargs)
+        try:
+            self._async = DiDUPClient(*args, **kwargs)
+        except BaseException:
+            self._loop.close()
+            raise
 
     def _run(self, coro: Coroutine[Any, Any, T]) -> T:
         return self._loop.run_until_complete(coro)
 
     def __enter__(self) -> "DiDUPClientSync":
-        self.login()
+        try:
+            self.login()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
 
     def close(self) -> None:
+        if self._loop.is_closed():
+            return
         try:
             self._run(self._async.aclose())
         finally:

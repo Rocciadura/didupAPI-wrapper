@@ -1,23 +1,25 @@
-"""Modelli Pydantic v2 che rappresentano le risposte delle API DiDUP.
+"""I modelli Pydantic con cui rappresentiamo le risposte di DiDUP.
 
-I tipi rispecchiano la risposta REALE dell'endpoint ``dashboard/dashboard``
-(verificata sul server e sugli schemi di ``portaleargo-api``). In particolare:
+Sono costruiti guardando le risposte vere di ``dashboard/dashboard`` (e gli
+schemi del progetto ``portaleargo-api``). Qualche cosa da sapere prima di
+usarli:
 
-* **tutte le chiavi primarie (`pk*`) sono stringhe** (hash esadecimali), non interi;
-* i flag tipo ``faMenoMedia`` / ``flgVisibileFamiglia`` arrivano come ``"S"``/``"N"``
-  e vengono convertiti in ``bool`` da un validator;
-* molti campi sono nullable.
+* le chiavi primarie (``pk*``) sono **stringhe** — hash esadecimali — non numeri;
+* flag come ``faMenoMedia`` o ``flgVisibileFamiglia`` arrivano come ``"S"``/``"N"``
+  e li trasformiamo in ``bool``;
+* Argo manda spesso ``null`` al posto di stringhe vuote o liste vuote: in quei
+  casi teniamo semplicemente il valore di default del campo.
 
-Base comune :class:`DiDUPModel`: alias camelCase + ``extra="ignore"`` (così i
-campi non mappati — es. ``operazione`` delle liste incrementali — non rompono il
-parsing).
+Tutti i modelli ereditano da :class:`DiDUPModel`, che accetta i nomi camelCase
+dell'API e ignora i campi che non conosciamo, così un campo nuovo lato server
+non ci fa saltare il parsing.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 __all__ = [
@@ -42,9 +44,9 @@ __all__ = [
 
 
 def _si_no_to_bool(v: Any) -> Any:
-    """Converte i flag ``"S"``/``"N"`` (o ``""``) in ``bool``.
+    """Trasforma i flag ``"S"``/``"N"`` di Argo in ``True``/``False``.
 
-    Lascia passare i bool già tipizzati e gli eventuali ``None``.
+    Se arriva già un bool (o ``None``) lo lasciamo com'è.
     """
     if isinstance(v, bool) or v is None:
         return v
@@ -54,7 +56,7 @@ def _si_no_to_bool(v: Any) -> Any:
 
 
 class DiDUPModel(BaseModel):
-    """Base comune: alias camelCase + tolleranza ai campi extra."""
+    """Base di tutti i modelli: nomi camelCase, campi extra ignorati, ``null`` tollerati."""
 
     model_config = ConfigDict(
         alias_generator=to_camel,
@@ -62,6 +64,15 @@ class DiDUPModel(BaseModel):
         extra="ignore",
         str_strip_whitespace=True,
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _ignora_null(cls, dati: Any) -> Any:
+        # Un campo a null equivale a "non c'è": così vale il default del modello
+        # invece di far fallire la validazione su un campo tipo `str = ""`.
+        if isinstance(dati, dict):
+            return {k: v for k, v in dati.items() if v is not None}
+        return dati
 
 
 # --------------------------------------------------------------------------- #
@@ -93,7 +104,7 @@ class Voto(DiDUPModel):
     pk_materia: str = ""
     pk_docente: str = ""
     des_materia: str = ""
-    materia_light: dict = Field(default_factory=dict)
+    materia_light: dict[str, Any] = Field(default_factory=dict)
     descrizione_prova: str = ""
     descrizione_voto: str = ""
     des_commento: str = ""
@@ -275,9 +286,10 @@ class Prenotazione(DiDUPModel):
 # Risposta principale della dashboard                                          #
 # --------------------------------------------------------------------------- #
 class DashboardResponse(DiDUPModel):
-    """Dati aggregati restituiti da ``dashboard/dashboard`` (sezione ``dati[0]``).
+    """Tutto quello che restituisce ``dashboard/dashboard`` (il blocco ``dati[0]``).
 
-    Da qui i vari endpoint estraggono e filtrano la porzione di competenza.
+    Argo manda quasi tutto in questa unica risposta; gli endpoint poi pescano
+    e filtrano la parte che gli interessa.
     """
 
     media_generale: float | None = None
@@ -287,7 +299,7 @@ class DashboardResponse(DiDUPModel):
     profilo_disabilitato: bool = False
     rimuovi_dati_locali: bool = False
     classi_extra: bool = False
-    data_aggiornamento: str = ""  # aggiunto dal client dagli header della risposta
+    data_aggiornamento: str = ""
 
     voti: list[Voto] = Field(default_factory=list)
     appello: list[EventoAppello] = Field(default_factory=list)
@@ -301,23 +313,3 @@ class DashboardResponse(DiDUPModel):
     lista_docenti_classe: list[Docente] = Field(default_factory=list)
     lista_periodi: list[Periodo] = Field(default_factory=list)
     prenotazioni_alunni: list[Prenotazione] = Field(default_factory=list)
-
-    # Alcune liste possono arrivare a `null`: le normalizziamo a lista vuota.
-    @field_validator(
-        "voti",
-        "appello",
-        "registro",
-        "note_disciplinari",
-        "promemoria",
-        "bacheca",
-        "bacheca_alunno",
-        "fuori_classe",
-        "lista_materie",
-        "lista_docenti_classe",
-        "lista_periodi",
-        "prenotazioni_alunni",
-        mode="before",
-    )
-    @classmethod
-    def _none_to_list(cls, v: Any) -> Any:
-        return [] if v is None else v

@@ -118,3 +118,18 @@ def test_campi_extra_ignorati():
         {"msg": "ok", "campoSconosciuto": 123}
     )
     assert dashboard.msg == "ok"
+
+
+def test_campi_null_usano_default():
+    """Argo manda spesso null al posto di stringhe o liste vuote."""
+    dashboard = DashboardResponse.model_validate(
+        {
+            "voti": [{"desCommento": None, "materiaLight": None, "faMenoMedia": None}],
+            "bacheca": None,
+        }
+    )
+    voto = dashboard.voti[0]
+    assert voto.des_commento == ""
+    assert voto.materia_light == {}
+    assert voto.fa_meno_media is False
+    assert dashboard.bacheca == []
