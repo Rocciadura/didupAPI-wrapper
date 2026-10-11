@@ -31,7 +31,7 @@ from .auth import (
     SessioneToken,
     recupera_versione_app,
 )
-from .client import DiDUPClient, DiDUPClientSync
+from .client import DiDUPClient, DiDUPClientSync, Profilo
 from .exceptions import (
     AuthError,
     DiDUPError,
@@ -65,6 +65,7 @@ __all__ = [
     # client
     "DiDUPClient",
     "DiDUPClientSync",
+    "Profilo",
     # auth
     "ArgoConfig",
     "Autenticatore",

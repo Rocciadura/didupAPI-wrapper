@@ -13,7 +13,7 @@ import pytest
 import respx
 
 from didupwrapper import AuthError, DashboardPoller, DiDUPClient, DiDUPClientSync, DiDUPError
-from didupwrapper.auth import ArgoConfig
+from didupwrapper.auth import ArgoConfig, SessioneToken
 
 from .test_models import DASHBOARD_JSON
 
@@ -218,3 +218,107 @@ async def test_poller_notifica_solo_le_novita():
         evento = await poller.tick()
         assert [v.cod_codice for v in ricevuti] == ["9"]
         assert evento.ha_novita
+
+
+LOGIN_DUE_FIGLI = {
+    "success": True,
+    "data": [
+        {"token": "tok-anna", "codMin": "SC1", "opzioni": []},
+        {"token": "tok-bea", "codMin": "SC1", "opzioni": []},
+    ],
+}
+ALUNNI = {
+    "tok-anna": {"nome": "Anna", "cognome": "Rossi", "nominativo": "Rossi Anna"},
+    "tok-bea": {"nome": "Beatrice", "cognome": "Rossi", "nominativo": "Rossi Beatrice"},
+}
+
+
+def _mock_profili() -> None:
+    respx.post(f"{BASE_URL}login").mock(return_value=httpx.Response(200, json=LOGIN_DUE_FIGLI))
+    respx.get(f"{BASE_URL}profilo").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json={"success": True, "data": {"alunno": ALUNNI[request.headers["x-auth-token"]]}},
+        )
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_profili_account_con_piu_figli():
+    _mock_profili()
+    async with _client() as didup:
+        profili = await didup.get_profili()
+        assert [p.nome_completo for p in profili] == ["Rossi Anna", "Rossi Beatrice"]
+        assert [p.token for p in profili] == ["tok-anna", "tok-bea"]
+        # Di default resta attivo il primo profilo, come prima.
+        assert didup.indice_profilo == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_seleziona_profilo_per_nome_cambia_token_e_svuota_cache():
+    _mock_profili()
+    dash_route = respx.post(f"{BASE_URL}dashboard/dashboard").mock(
+        return_value=httpx.Response(200, json=DASHBOARD_RESPONSE)
+    )
+    async with _client() as didup:
+        await didup.get_dashboard()
+        scelto = await didup.seleziona_profilo("beatrice")
+        assert scelto.indice == 1
+        assert didup.indice_profilo == 1
+        await didup.get_dashboard()
+        assert dash_route.call_count == 2
+        assert dash_route.calls.last.request.headers["x-auth-token"] == "tok-bea"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_seleziona_profilo_per_indice_e_oggetto():
+    _mock_profili()
+    async with _client() as didup:
+        profili = await didup.get_profili()
+        assert (await didup.seleziona_profilo(1)).nome == "Beatrice"
+        assert (await didup.seleziona_profilo(profili[0])).nome == "Anna"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_seleziona_profilo_ambiguo_o_assente_solleva_errore():
+    _mock_profili()
+    async with _client() as didup:
+        with pytest.raises(DiDUPError, match="Più profili"):
+            await didup.seleziona_profilo("Rossi")
+        with pytest.raises(DiDUPError, match="Nessun profilo"):
+            await didup.seleziona_profilo("Carla")
+        assert didup.indice_profilo == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_profilo_scelto_resta_attivo_dopo_nuovo_login():
+    _mock_profili()
+    dash_route = respx.post(f"{BASE_URL}dashboard/dashboard").mock(
+        return_value=httpx.Response(200, json=DASHBOARD_RESPONSE)
+    )
+    async with _client() as didup:
+        await didup.seleziona_profilo("Beatrice")
+
+        # Sessione OAuth scaduta: il client rifà OAuth e login dell'app.
+        async def nuovo_login(http):
+            didup._auth.sessione = SessioneToken(access_token="nuovo-oauth-token")
+            return didup._auth.sessione
+
+        didup._auth.sessione = None
+        didup._auth.login = nuovo_login
+        await didup.get_dashboard()
+        assert dash_route.calls.last.request.headers["x-auth-token"] == "tok-bea"
+        assert didup.indice_profilo == 1
+
+
+def test_client_sync_profili():
+    with respx.mock:
+        _mock_profili()
+        with DiDUPClientSync(config=CONFIG, access_token="fake-oauth-token") as didup:
+            assert len(didup.get_profili()) == 2
+            assert didup.seleziona_profilo("Anna").indice == 0

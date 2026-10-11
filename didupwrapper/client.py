@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Coroutine, TypeVar
 
 import httpx
@@ -56,14 +56,51 @@ from .models import (
 if TYPE_CHECKING:
     from .models import FileBachecaAlunno
 
-__all__ = ["DiDUPClient", "DiDUPClientSync"]
+__all__ = ["DiDUPClient", "DiDUPClientSync", "Profilo"]
 
 T = TypeVar("T")
 
 _LOGIN_PATH = "login"
+_PROFILO_PATH = "profilo"
 _DASHBOARD_PATH = "dashboard/dashboard"
 # Chiedendo i dati "aggiornati dal 2000" il server ci manda tutto.
 _DATA_INIZIO_DEFAULT = "2000-01-01 00:00:00.000"
+
+
+@dataclass(frozen=True)
+class Profilo:
+    """Un profilo dell'account: con un account genitore ce n'è uno per figlio.
+
+    ``indice`` è la posizione nella risposta di ``POST login`` e si può passare
+    a :meth:`DiDUPClient.seleziona_profilo`. Nome e cognome arrivano da
+    ``GET profilo``; per i profili disabilitati restano vuoti.
+    """
+
+    indice: int
+    token: str | None
+    cod_min: str | None
+    nome: str = ""
+    cognome: str = ""
+    nominativo: str = ""
+    disabilitato: bool = False
+    dati_login: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def nome_completo(self) -> str:
+        return self.nominativo or f"{self.cognome} {self.nome}".strip()
+
+    def corrisponde(self, cercato: str) -> bool:
+        """Vero se ``cercato`` è il nome, nome e cognome (in qualsiasi ordine)
+        o una parola del nominativo. Non distingue maiuscole e spazi doppi."""
+        cercato = " ".join(cercato.split()).casefold()
+        if not cercato:
+            return False
+        nome = " ".join(self.nome.split()).casefold()
+        cognome = " ".join(self.cognome.split()).casefold()
+        nominativo = " ".join(self.nome_completo.split()).casefold()
+        return cercato in (nome, nominativo, f"{nome} {cognome}", f"{cognome} {nome}") or (
+            cercato in nominativo.split()
+        )
 
 
 class DiDUPClient:
@@ -109,6 +146,12 @@ class DiDUPClient:
         )
 
         self._login_data: dict[str, Any] | None = None
+        # Tutti i profili restituiti da ``POST login`` (uno per figlio negli
+        # account genitore) e quello scelto, ricordato per indice e token così
+        # da ritrovarlo quando il login va rifatto.
+        self._profili_login: list[dict[str, Any]] = []
+        self._indice_profilo = 0
+        self._token_profilo: str | None = None
         self._dashboard_cache: DashboardResponse | None = None
         self.voti = VotiEndpoint(self)
         self.assenze = AssenzeEndpoint(self)
@@ -175,8 +218,98 @@ class DiDUPClient:
         lista = (dati or {}).get("data") or []
         if not lista:
             raise DiDUPError("Login applicativo: nessun profilo restituito", payload=dati)
-        self._login_data = lista[0]
+        self._profili_login = list(lista)
+        self._login_data = lista[self._ritrova_profilo(lista)]
         return self._login_data
+
+    def _ritrova_profilo(self, lista: list[dict[str, Any]]) -> int:
+        """L'indice del profilo scelto nella nuova risposta di login.
+
+        Se il login va rifatto (sessione scaduta) non vogliamo tornare di
+        nascosto al primo figlio: cerchiamo lo stesso token, altrimenti lo
+        stesso indice; se nessuno dei due regge è meglio un errore.
+        """
+        if self._token_profilo is not None:
+            for indice, voce in enumerate(lista):
+                if voce.get("token") == self._token_profilo:
+                    self._indice_profilo = indice
+                    return indice
+        if self._indice_profilo >= len(lista):
+            raise DiDUPError(
+                f"Il profilo selezionato (indice {self._indice_profilo}) non è più "
+                f"tra quelli dell'account ({len(lista)} profili)",
+                payload=lista,
+            )
+        self._token_profilo = lista[self._indice_profilo].get("token")
+        return self._indice_profilo
+
+    # ------------------------------------------------------------------ #
+    # Profili (account genitore con più figli)                           #
+    # ------------------------------------------------------------------ #
+    async def get_profili(self) -> list[Profilo]:
+        """Tutti i profili dell'account, con nome e cognome dell'alunno.
+
+        Per ogni profilo attivo fa una ``GET profilo`` con il suo token.
+        """
+        if self._login_data is None:
+            await self.login()
+        profili = []
+        for indice, voce in enumerate(self._profili_login):
+            disabilitato = bool(voce.get("profiloDisabilitato"))
+            alunno: dict[str, Any] = {}
+            if not disabilitato:
+                headers: dict[str, str] = {}
+                if voce.get("token"):
+                    headers["x-auth-token"] = voce["token"]
+                if voce.get("codMin"):
+                    headers["x-cod-min"] = voce["codMin"]
+                dati = await self._get(_PROFILO_PATH, headers=headers)
+                self._verifica_success(dati)
+                alunno = ((dati or {}).get("data") or {}).get("alunno") or {}
+            profili.append(
+                Profilo(
+                    indice=indice,
+                    token=voce.get("token"),
+                    cod_min=voce.get("codMin"),
+                    nome=alunno.get("nome") or "",
+                    cognome=alunno.get("cognome") or "",
+                    nominativo=alunno.get("nominativo") or "",
+                    disabilitato=disabilitato,
+                    dati_login=voce,
+                )
+            )
+        return profili
+
+    async def seleziona_profilo(self, profilo: Profilo | int | str) -> Profilo:
+        """Rende attivo un profilo e svuota la cache della dashboard.
+
+        ``profilo`` può essere un :class:`Profilo` di :meth:`get_profili`,
+        il suo indice oppure il nome dell'alunno (vedi :meth:`Profilo.corrisponde`).
+        """
+        profili = await self.get_profili()
+        if isinstance(profilo, Profilo):
+            scelti = [p for p in profili if p.indice == profilo.indice]
+        elif isinstance(profilo, int):
+            scelti = [p for p in profili if p.indice == profilo]
+        else:
+            scelti = [p for p in profili if p.corrisponde(profilo)]
+        if len(scelti) != 1:
+            nomi = ", ".join(p.nome_completo or f"#{p.indice}" for p in profili)
+            motivo = "Nessun profilo" if not scelti else "Più profili"
+            raise DiDUPError(f"{motivo} corrisponde a {profilo!r} (profili dell'account: {nomi})")
+        scelto = scelti[0]
+        if scelto.disabilitato:
+            raise DiDUPError(f"Il profilo #{scelto.indice} è disabilitato")
+        self._indice_profilo = scelto.indice
+        self._token_profilo = scelto.token
+        self._login_data = self._profili_login[scelto.indice]
+        self.invalida_cache()
+        return scelto
+
+    @property
+    def indice_profilo(self) -> int:
+        """L'indice del profilo attivo (0 se non ne hai scelto uno)."""
+        return self._indice_profilo
 
     @property
     def autenticato(self) -> bool:
@@ -387,6 +520,16 @@ class DiDUPClientSync:
 
     def invalida_cache(self) -> None:
         self._async.invalida_cache()
+
+    def get_profili(self) -> list[Profilo]:
+        return self._run(self._async.get_profili())
+
+    def seleziona_profilo(self, profilo: Profilo | int | str) -> Profilo:
+        return self._run(self._async.seleziona_profilo(profilo))
+
+    @property
+    def indice_profilo(self) -> int:
+        return self._async.indice_profilo
 
     def get_dashboard(self, *, forza_refresh: bool = False) -> DashboardResponse:
         return self._run(self._async.get_dashboard(forza_refresh=forza_refresh))

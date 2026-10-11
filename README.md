@@ -22,6 +22,7 @@ bacheca, promemoria e altro, restituiti come modelli tipizzati Pydantic v2.
 - [Requisiti e installazione](#requisiti-e-installazione)
 - [Guida rapida](#guida-rapida)
 - [Versione del client](#versione-del-client)
+- [Account con più figli](#account-con-più-figli)
 - [Riferimento API](#riferimento-api)
 - [Gestione degli errori](#gestione-degli-errori)
 - [Notifiche sulle novità](#notifiche-sulle-novità)
@@ -126,6 +127,26 @@ from didupwrapper import recupera_versione_app
 print(await recupera_versione_app())  # es. "1.29.2", oppure None se non raggiungibile
 ```
 
+## Account con più figli
+
+Con un account genitore collegato a più figli, Argo restituisce un profilo per
+ogni figlio. Di default il client usa il primo; per consultare gli altri:
+
+```python
+with DiDUPClientSync("SC12345", "mario.rossi", "password") as didup:
+    for profilo in didup.get_profili():
+        print(profilo.indice, profilo.nome_completo)
+
+    didup.seleziona_profilo("Beatrice")  # oppure l'indice, o un Profilo
+    print(didup.get_voti())
+```
+
+`seleziona_profilo()` accetta il nome, nome e cognome in qualsiasi ordine o una
+parola del nominativo; se il nome corrisponde a nessuno o a più profili solleva
+`DiDUPError`. Cambiando profilo la cache della dashboard viene svuotata, e il
+profilo scelto resta attivo anche quando il client rifà il login per una
+sessione scaduta.
+
 ## Riferimento API
 
 ### Metodi del client
@@ -149,6 +170,8 @@ Disponibili sia su `DiDUPClient` (con `await`) sia su `DiDUPClientSync`.
 | `get_prenotazioni()` | Colloqui prenotati (`list[Prenotazione]`) |
 | `get_media_generale()` | Media complessiva (`float \| None`) |
 | `invalida_cache()` | Svuota la cache della dashboard |
+| `get_profili()` | Profili dell'account, uno per figlio (`list[Profilo]`) |
+| `seleziona_profilo(profilo)` | Rende attivo un profilo per nome, indice o `Profilo` |
 
 La dashboard viene scaricata una volta e riutilizzata dalle chiamate
 successive. Per dati aggiornati usa `get_dashboard(forza_refresh=True)` oppure
