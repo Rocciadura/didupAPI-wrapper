@@ -1,4 +1,4 @@
-# didupwrapper
+# DidupWrapper
 
 [![PyPI](https://img.shields.io/pypi/v/didupwrapper.svg)](https://pypi.org/project/didupwrapper/)
 [![Python](https://img.shields.io/pypi/pyversions/didupwrapper.svg)](https://pypi.org/project/didupwrapper/)
