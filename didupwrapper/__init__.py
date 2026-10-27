@@ -58,7 +58,7 @@ from .models import (
 )
 from .workers import DashboardPoller, EventoPoller
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 __all__ = [  # noqa: RUF022 - raggruppato per argomento
     "__version__",
