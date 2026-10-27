@@ -253,6 +253,19 @@ ruff check .      # lint
 mypy didupwrapper # type checking
 ```
 
+Gli stessi controlli girano in automatico con GitHub Actions su Python
+3.10–3.13 a ogni push su `main` e a ogni pull request.
+
+### Pubblicare una nuova versione
+
+1. Aggiorna `version` in `pyproject.toml` e `__version__` in
+   `didupwrapper/__init__.py` (un test controlla che coincidano).
+2. Fai il commit e crea un tag con lo stesso numero, es. `git tag v0.1.3`.
+3. `git push --tags`: il workflow `publish.yml` fa la build e la carica su
+   PyPI con il Trusted Publishing (va configurato una volta sola su PyPI,
+   indicando questo repository, il workflow `publish.yml` e l'environment
+   `pypi`).
+
 Contributi e segnalazioni sono benvenuti tramite
 [issue](https://github.com/Rocciadura/didupAPI-wrapper/issues) e pull request.
 

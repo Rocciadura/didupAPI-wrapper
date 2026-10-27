@@ -1,0 +1,46 @@
+name: Pubblica su PyPI
+
+# Parte quando si pusha un tag come "v0.1.3". Usa il Trusted Publishing di
+# PyPI: niente token da salvare nei secret, basta configurare il progetto su
+# https://pypi.org/manage/project/didupwrapper/settings/publishing/
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Controlla che il tag corrisponda alla versione
+        run: |
+          versione=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "v$versione" != "$GITHUB_REF_NAME" ]; then
+            echo "Il tag $GITHUB_REF_NAME non corrisponde alla versione $versione in pyproject.toml"
+            exit 1
+          fi
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
