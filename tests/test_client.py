@@ -180,9 +180,8 @@ async def test_login_fallito_chiude_il_client_http():
 def test_client_sync_login_fallito_chiude_il_loop():
     respx.post(f"{BASE_URL}login").mock(return_value=httpx.Response(401))
     didup = DiDUPClientSync(config=CONFIG, access_token="fake-oauth-token")
-    with pytest.raises(AuthError):
-        with didup:
-            pass
+    with pytest.raises(AuthError), didup:
+        pass
     assert didup._loop.is_closed()
 
 

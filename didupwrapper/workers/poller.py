@@ -17,10 +17,12 @@ Esempio::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
+from collections.abc import Awaitable, Callable, Hashable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Awaitable, Callable, Hashable, Sequence, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from ..models import (
     ComunicazioneBacheca,
@@ -76,7 +78,7 @@ class DashboardPoller:
 
     def __init__(
         self,
-        client: "DiDUPClient",
+        client: DiDUPClient,
         *,
         intervallo: float = 300.0,
         on_nuovi_voti: Callback[Voto] | None = None,
@@ -120,12 +122,10 @@ class DashboardPoller:
         while not self._stop.is_set():
             try:
                 await self.tick()
-            except Exception:  # noqa: BLE001 - un errore di rete non deve fermare tutto
+            except Exception:  # un errore di rete non deve fermare tutto
                 logger.exception("Errore durante il ciclo di polling")
-            try:
+            with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self._intervallo)
-            except asyncio.TimeoutError:
-                pass
         logger.info("Poller fermato")
 
     def stop(self) -> None:

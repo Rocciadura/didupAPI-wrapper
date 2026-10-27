@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Coroutine
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Coroutine, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
 
@@ -163,7 +164,7 @@ class DiDUPClient:
     # ------------------------------------------------------------------ #
     # Ciclo di vita / context manager                                    #
     # ------------------------------------------------------------------ #
-    async def __aenter__(self) -> "DiDUPClient":
+    async def __aenter__(self) -> DiDUPClient:
         try:
             await self.login()
         except BaseException:
@@ -424,7 +425,7 @@ class DiDUPClient:
     async def get_bacheca(self) -> list[ComunicazioneBacheca]:
         return await self.bacheca.lista()
 
-    async def get_bacheca_alunno(self) -> list["FileBachecaAlunno"]:
+    async def get_bacheca_alunno(self) -> list[FileBachecaAlunno]:
         return await self.bacheca.file_alunno()
 
     async def get_promemoria(self) -> list[Promemoria]:
@@ -488,7 +489,7 @@ class DiDUPClientSync:
     def _run(self, coro: Coroutine[Any, Any, T]) -> T:
         return self._loop.run_until_complete(coro)
 
-    def __enter__(self) -> "DiDUPClientSync":
+    def __enter__(self) -> DiDUPClientSync:
         try:
             self.login()
         except BaseException:
@@ -546,7 +547,7 @@ class DiDUPClientSync:
     def get_bacheca(self) -> list[ComunicazioneBacheca]:
         return self._run(self._async.get_bacheca())
 
-    def get_bacheca_alunno(self) -> list["FileBachecaAlunno"]:
+    def get_bacheca_alunno(self) -> list[FileBachecaAlunno]:
         return self._run(self._async.get_bacheca_alunno())
 
     def get_promemoria(self) -> list[Promemoria]:

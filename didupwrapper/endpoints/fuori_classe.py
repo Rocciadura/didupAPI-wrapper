@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from . import BaseEndpoint
 from ..models import FuoriClasse
+from . import BaseEndpoint
 
 __all__ = ["FuoriClasseEndpoint"]
 

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from . import BaseEndpoint
 from ..models import Promemoria
+from . import BaseEndpoint
 
 __all__ = ["PromemoriaEndpoint"]
 

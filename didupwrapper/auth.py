@@ -21,14 +21,14 @@ import httpx
 from .exceptions import AuthError, from_response
 
 __all__ = [
+    "APP_BUNDLE_ID",
     "ArgoConfig",
-    "Credenziali",
-    "SessioneToken",
-    "LoginLink",
     "Autenticatore",
+    "Credenziali",
+    "LoginLink",
+    "SessioneToken",
     "formatta_data",
     "recupera_versione_app",
-    "APP_BUNDLE_ID",
 ]
 
 APP_BUNDLE_ID = "it.argosoft.didup.famiglia.new"

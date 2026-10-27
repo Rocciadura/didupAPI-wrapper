@@ -18,10 +18,10 @@ if TYPE_CHECKING:
 class BaseEndpoint:
     """La base comune degli endpoint: tiene il client e sa come chiedergli la dashboard."""
 
-    def __init__(self, client: "DiDUPClient") -> None:
+    def __init__(self, client: DiDUPClient) -> None:
         self._client = client
 
-    async def _dashboard(self, *, forza_refresh: bool = False) -> "DashboardResponse":
+    async def _dashboard(self, *, forza_refresh: bool = False) -> DashboardResponse:
         return await self._client.get_dashboard(forza_refresh=forza_refresh)
 
 
@@ -33,11 +33,11 @@ from .registro import RegistroEndpoint  # noqa: E402
 from .voti import VotiEndpoint  # noqa: E402
 
 __all__ = [
-    "BaseEndpoint",
-    "VotiEndpoint",
     "AssenzeEndpoint",
-    "RegistroEndpoint",
     "BachecaEndpoint",
-    "PromemoriaEndpoint",
+    "BaseEndpoint",
     "FuoriClasseEndpoint",
+    "PromemoriaEndpoint",
+    "RegistroEndpoint",
+    "VotiEndpoint",
 ]

@@ -40,8 +40,8 @@ from .exceptions import (
 )
 from .models import (
     Allegato,
-    ComunicazioneBacheca,
     Compito,
+    ComunicazioneBacheca,
     DashboardResponse,
     DettaglioPrenotazione,
     Docente,
@@ -60,7 +60,7 @@ from .workers import DashboardPoller, EventoPoller
 
 __version__ = "0.1.2"
 
-__all__ = [
+__all__ = [  # noqa: RUF022 - raggruppato per argomento
     "__version__",
     # client
     "DiDUPClient",

@@ -12,10 +12,10 @@ from typing import Any
 import httpx
 
 __all__ = [
-    "DiDUPError",
     "AuthError",
-    "RateLimitError",
+    "DiDUPError",
     "NotFoundError",
+    "RateLimitError",
     "from_response",
 ]
 
