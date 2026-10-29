@@ -51,6 +51,12 @@ def _mock_flusso_sso() -> dict[str, respx.Route]:
     }
 
 
+def _mock_token() -> respx.Route:
+    return respx.post(CONFIG.oauth_token_url).mock(
+        return_value=httpx.Response(200, json={"access_token": "acc-1", "expires_in": 3600})
+    )
+
+
 def test_pkce_challenge_vettore_rfc7636():
     # Esempio dell'appendice B della RFC 7636.
     verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
@@ -122,6 +128,80 @@ async def test_login_completo():
     assert "code=il-code" in corpo
     assert "grant_type=authorization_code" in corpo
     assert "code_verifier=" in corpo
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_cookie_del_login_tornano_solo_al_portale():
+    rotte = _mock_flusso_sso()
+    # Il login su www.portaleargo.it imposta un cookie di sessione: come in un
+    # browser va rimandato solo a www (passo 3), non ad auth (passi 2 e 4).
+    rotte["sso"].mock(return_value=_redirect(URL_2, "sso_session=s1"))
+    _mock_token()
+
+    async with httpx.AsyncClient() as http:
+        await Autenticatore(CREDENZIALI).login(http)
+
+    assert rotte["r2"].calls.last.request.headers["cookie"] == "oauth2_csrf=abc"
+    assert rotte["r3"].calls.last.request.headers["cookie"] == "sso_session=s1"
+    assert "sso_session" not in rotte["r4"].calls.last.request.headers["cookie"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_cookie_con_domain_valgono_per_i_sottodomini():
+    rotte = _mock_flusso_sso()
+    rotte["sso"].mock(
+        return_value=httpx.Response(
+            302,
+            headers=[
+                ("location", URL_2),
+                ("set-cookie", "condiviso=1; Domain=.portaleargo.it; Path=/"),
+            ],
+        )
+    )
+    _mock_token()
+
+    async with httpx.AsyncClient() as http:
+        await Autenticatore(CREDENZIALI).login(http)
+
+    assert "condiviso=1" in rotte["r2"].calls.last.request.headers["cookie"]
+    assert rotte["r3"].calls.last.request.headers["cookie"] == "condiviso=1"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_redirect_in_piu_e_location_relativa():
+    rotte = _mock_flusso_sso()
+    # Un passo in più nella catena, con un Location relativo.
+    rotte["r3"].mock(return_value=_redirect("/auth/sso/extra?x=1"))
+    extra = respx.get("https://www.portaleargo.it/auth/sso/extra").mock(
+        return_value=_redirect(URL_4)
+    )
+    _mock_token()
+
+    async with httpx.AsyncClient() as http:
+        sessione = await Autenticatore(CREDENZIALI).login(http)
+
+    assert sessione.access_token == "acc-1"
+    assert extra.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_catena_interrotta_spiega_dove():
+    rotte = _mock_flusso_sso()
+    rotte["r3"].mock(return_value=httpx.Response(200, text="<html>consenso</html>"))
+
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(AuthError) as info:
+            await Autenticatore(CREDENZIALI).login(http)
+
+    messaggio = str(info.value)
+    assert "Catena OAuth interrotta (redirect 3)" in messaggio
+    assert "HTTP 200 da https://www.portaleargo.it/auth/sso/consent" in messaggio
+    # La query (con challenge e code) non finisce nel messaggio.
+    assert "consent_challenge" not in messaggio
 
 
 @respx.mock

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import secrets
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import httpx
 
@@ -30,6 +31,8 @@ __all__ = [
     "formatta_data",
     "recupera_versione_app",
 ]
+
+logger = logging.getLogger("didupwrapper.auth")
 
 APP_BUNDLE_ID = "it.argosoft.didup.famiglia.new"
 _APP_LOOKUP_URL = "https://itunes.apple.com/lookup"
@@ -211,28 +214,35 @@ class Autenticatore:
         """Segue i redirect del portale SSO finché non salta fuori il ``code``.
 
         I redirect li seguiamo a mano (leggendo ``Location``) e i cookie li
-        passiamo noi, solo dove li passa l'app: se lasciassimo fare a httpx
-        manderebbe cookie in punti in cui il server non se li aspetta.
+        gestiamo noi come farebbe un browser: ogni cookie torna solo all'host
+        (o al dominio) che l'ha impostato. Il cookie jar di httpx li
+        manderebbe anche dove il server non se li aspetta.
         """
         assert self.credenziali is not None
-        cookies: list[str] = []
+        cookies = _CookieJar()
 
         async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as c:
 
-            async def passo(method: str, url: str, **kwargs: object) -> httpx.Response:
-                r = await c.request(method, url, **kwargs)  # type: ignore[arg-type]
+            async def passo(
+                n: int, method: str, url: str, **kwargs: Any
+            ) -> httpx.Response:
+                headers = dict(kwargs.pop("headers", None) or {})
+                cookie = cookies.header_per(url)
+                if cookie:
+                    headers["cookie"] = cookie
+                r = await c.request(method, url, headers=headers, **kwargs)
                 c.cookies.clear()  # i cookie li gestiamo noi, vedi sopra
+                cookies.raccogli(r)
+                logger.debug(
+                    "OAuth passo %d: %s %s -> HTTP %d", n, method, _senza_query(url), r.status_code
+                )
                 return r
 
             # 1) Apriamo l'URL OAuth: ci rimanda alla pagina di login con un login_challenge.
-            r0 = await passo("GET", link.url)
-            loc = r0.headers.get("location")
-            _raccogli_cookie(r0, cookies)
+            r0 = await passo(0, "GET", link.url)
+            loc = _location(r0)
             if not loc:
-                raise AuthError(
-                    "Avvio OAuth: redirect mancante",
-                    status_code=r0.status_code,
-                )
+                raise AuthError("Avvio OAuth: redirect mancante", status_code=r0.status_code)
             challenge = _query_param(loc, "login_challenge")
             if not challenge:
                 raise AuthError("Avvio OAuth: 'login_challenge' non trovato")
@@ -250,38 +260,39 @@ class Autenticatore:
                 ]
             )
             r1 = await passo(
+                1,
                 "POST",
                 self.config.sso_login_url,
                 content=body,
                 headers={"content-type": "application/x-www-form-urlencoded"},
             )
-            url1 = r1.headers.get("location")
-            if not url1:
+            url = _location(r1)
+            if not url:
                 raise AuthError(
                     "Login SSO fallito: credenziali errate o flusso cambiato",
                     status_code=r1.status_code,
                 )
 
-            # 3) Dopo il login ci sono ancora tre redirect prima di arrivare al code.
-            r2 = await passo("GET", url1, headers={"cookie": "; ".join(cookies)})
-            url2 = r2.headers.get("location")
-            _raccogli_cookie(r2, cookies)
-            if not url2:
-                raise AuthError("Catena OAuth interrotta (redirect 2)")
+            # 3) Dopo il login il portale fa ancora qualche redirect (di solito tre)
+            #    prima di rimandarci al redirect_uri dell'app con il code.
+            for n in range(2, 2 + _MAX_REDIRECT):
+                if url.startswith(self.config.redirect_uri):
+                    break
+                r = await passo(n, "GET", url)
+                prossimo = _location(r)
+                if not prossimo:
+                    raise AuthError(
+                        f"Catena OAuth interrotta (redirect {n}): "
+                        f"HTTP {r.status_code} da {_senza_query(url)}",
+                        status_code=r.status_code,
+                    )
+                url = prossimo
+            else:
+                raise AuthError("Catena OAuth interrotta: troppi redirect")
 
-            r3 = await passo("GET", url2)
-            url3 = r3.headers.get("location")
-            if not url3:
-                raise AuthError("Catena OAuth interrotta (redirect 3)")
-
-            r4 = await passo("GET", url3, headers={"cookie": "; ".join(cookies)})
-            url4 = r4.headers.get("location")
-            if not url4:
-                raise AuthError("Catena OAuth interrotta (redirect finale)")
-
-        code = _query_param(url4, "code")
+        code = _query_param(url, "code")
         if not code:
-            raise AuthError(f"Code non presente nel redirect finale: {url4}")
+            raise AuthError(f"Code non presente nel redirect finale: {_senza_query(url)}")
         return code
 
     async def _ottieni_token(
@@ -328,12 +339,62 @@ class Autenticatore:
         )
 
 
-def _raccogli_cookie(response: httpx.Response, cookies: list[str]) -> None:
-    """Aggiunge a ``cookies`` le coppie ``nome=valore`` dei ``Set-Cookie`` ricevuti."""
-    for header in response.headers.get_list("set-cookie"):
-        coppia = header.split(";", 1)[0].strip()
-        if coppia:
-            cookies.append(coppia)
+_MAX_REDIRECT = 10
+
+
+class _CookieJar:
+    """Un cookie jar minimale: rimanda ogni cookie solo all'host o al dominio giusto.
+
+    Senza attributo ``Domain`` un cookie vale solo per l'host che l'ha
+    impostato; con ``Domain=portaleargo.it`` vale anche per i sottodomini.
+    """
+
+    def __init__(self) -> None:
+        # (dominio, solo_host) -> {nome: valore}, in ordine di arrivo
+        self._cookie: dict[tuple[str, bool], dict[str, str]] = {}
+
+    def raccogli(self, response: httpx.Response) -> None:
+        host = response.request.url.host
+        for header in response.headers.get_list("set-cookie"):
+            coppia, *attributi = (parte.strip() for parte in header.split(";"))
+            nome, sep, valore = coppia.partition("=")
+            if not sep or not nome:
+                continue
+            dominio, solo_host, cancella = host, True, False
+            for attributo in attributi:
+                chiave, _, val = attributo.partition("=")
+                chiave = chiave.strip().lower()
+                if chiave == "domain" and val.strip():
+                    dominio, solo_host = val.strip().lstrip(".").lower(), False
+                elif chiave == "max-age" and val.strip().lstrip("-").isdigit():
+                    cancella = int(val) <= 0
+            jar = self._cookie.setdefault((dominio, solo_host), {})
+            jar.pop(nome, None)
+            if not cancella:
+                jar[nome] = valore
+
+    def header_per(self, url: str) -> str:
+        host = httpx.URL(url).host
+        coppie = [
+            f"{nome}={valore}"
+            for (dominio, solo_host), jar in self._cookie.items()
+            if host == dominio or (not solo_host and host.endswith("." + dominio))
+            for nome, valore in jar.items()
+        ]
+        return "; ".join(coppie)
+
+
+def _location(response: httpx.Response) -> str | None:
+    """Il ``Location`` di un redirect, reso assoluto se il server lo manda relativo."""
+    if not response.is_redirect:
+        return None
+    loc = response.headers.get("location")
+    return urljoin(str(response.request.url), loc) if loc else None
+
+
+def _senza_query(url: str) -> str:
+    """L'URL senza query string, per log ed errori (la query contiene code e challenge)."""
+    return url.split("?", 1)[0]
 
 
 def _query_param(url: str, nome: str) -> str | None:
