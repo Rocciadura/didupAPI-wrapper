@@ -55,6 +55,13 @@ def _si_no_to_bool(v: Any) -> Any:
     return bool(v)
 
 
+def _a_stringa(v: Any) -> Any:
+    """Accetta anche numeri dove ci aspettiamo testo (es. un'ora mandata come ``3``)."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return str(v)
+    return v
+
+
 class DiDUPModel(BaseModel):
     """Base di tutti i modelli: nomi camelCase, campi extra ignorati, ``null`` tollerati."""
 
@@ -171,11 +178,34 @@ class RegistroLezione(DiDUPModel):
 
 
 class NotaDisciplinare(DiDUPModel):
+    """Una nota disciplinare.
+
+    Argo mette il testo della nota in ``desDescrizione``: per leggerlo usa
+    :attr:`testo`, che ripiega sugli altri campi se quello manca.
+    """
+
     data: str = ""
     dat_giorno: str = ""
     dat_evento: str = ""
+    dat_nota: str = ""
+    ora_nota: str = ""
     docente: str = ""
     descrizione: str = ""
+    des_descrizione: str = ""
+    des_nota: str = ""
+    flg_tipo: str = ""
+
+    _v_str = field_validator("ora_nota", "flg_tipo", mode="before")(_a_stringa)
+
+    @property
+    def testo(self) -> str:
+        """Il testo della nota."""
+        return self.des_descrizione or self.des_nota or self.descrizione
+
+    @property
+    def data_nota(self) -> str:
+        """La data della nota, dal campo più specifico disponibile."""
+        return self.dat_nota or self.dat_giorno or self.data or self.dat_evento
 
 
 class Promemoria(DiDUPModel):

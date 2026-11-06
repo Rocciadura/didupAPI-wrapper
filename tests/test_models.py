@@ -120,6 +120,41 @@ def test_campi_extra_ignorati():
     assert dashboard.msg == "ok"
 
 
+def test_note_disciplinari_con_testo():
+    """Il testo della nota arriva in ``desDescrizione`` (issue #4)."""
+    dashboard = DashboardResponse.model_validate(
+        {
+            "noteDisciplinari": [
+                {
+                    "datNota": "2026-11-03",
+                    "oraNota": 3,
+                    "docente": "Rossi Mario",
+                    "desDescrizione": "Disturba ripetutamente la lezione",
+                    "flgTipo": "C",
+                    "campoNuovo": "ignorato",
+                },
+                {"datGiorno": "2026-10-01", "desNota": "Testo da desNota"},
+                {"datEvento": "2026-09-01", "desDescrizione": None},
+            ]
+        }
+    )
+    nota, solo_des_nota, vuota = dashboard.note_disciplinari
+
+    assert nota.des_descrizione == "Disturba ripetutamente la lezione"
+    assert nota.testo == "Disturba ripetutamente la lezione"
+    assert nota.dat_nota == "2026-11-03"
+    assert nota.data_nota == "2026-11-03"
+    assert nota.ora_nota == "3"  # anche se Argo la manda come numero
+    assert nota.flg_tipo == "C"
+    assert nota.docente == "Rossi Mario"
+
+    assert solo_des_nota.testo == "Testo da desNota"
+    assert solo_des_nota.data_nota == "2026-10-01"
+
+    assert vuota.testo == ""
+    assert vuota.data_nota == "2026-09-01"
+
+
 def test_campi_null_usano_default():
     """Argo manda spesso null al posto di stringhe o liste vuote."""
     dashboard = DashboardResponse.model_validate(

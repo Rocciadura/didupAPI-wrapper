@@ -163,7 +163,7 @@ Disponibili sia su `DiDUPClient` (con `await`) sia su `DiDUPClientSync`.
 | `get_bacheca_alunno()` | File della bacheca alunno (`list[FileBachecaAlunno]`) |
 | `get_promemoria()` | Promemoria dei docenti (`list[Promemoria]`) |
 | `get_fuori_classe()` | Attività fuori classe (`list[FuoriClasse]`) |
-| `get_note_disciplinari()` | Note disciplinari (`list[NotaDisciplinare]`) |
+| `get_note_disciplinari()` | Note disciplinari (`list[NotaDisciplinare]`, testo in `nota.testo`) |
 | `get_materie()` | Materie (`list[Materia]`) |
 | `get_docenti()` | Docenti della classe (`list[Docente]`) |
 | `get_periodi()` | Periodi / quadrimestri (`list[Periodo]`) |

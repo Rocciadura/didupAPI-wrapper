@@ -227,7 +227,7 @@ def _chiave_comunicazione(c: ComunicazioneBacheca) -> Hashable:
 
 
 def _chiave_nota(n: NotaDisciplinare) -> Hashable:
-    return (n.dat_giorno, n.docente, n.descrizione)
+    return (n.data_nota, n.ora_nota, n.docente, n.testo)
 
 
 def _chiave_promemoria(p: Promemoria) -> Hashable:
