@@ -191,17 +191,183 @@ async def test_redirect_in_piu_e_location_relativa():
 @pytest.mark.asyncio
 async def test_catena_interrotta_spiega_dove():
     rotte = _mock_flusso_sso()
-    rotte["r3"].mock(return_value=httpx.Response(200, text="<html>consenso</html>"))
+    rotte["r2"].mock(
+        return_value=httpx.Response(
+            200, text="<html><title>Manutenzione</title><p>Riprova più tardi</p></html>"
+        )
+    )
 
     async with httpx.AsyncClient() as http:
         with pytest.raises(AuthError) as info:
             await Autenticatore(CREDENZIALI).login(http)
 
     messaggio = str(info.value)
-    assert "Catena OAuth interrotta (redirect 3)" in messaggio
-    assert "HTTP 200 da https://www.portaleargo.it/auth/sso/consent" in messaggio
-    # La query (con challenge e code) non finisce nel messaggio.
-    assert "consent_challenge" not in messaggio
+    assert "Catena OAuth interrotta (redirect 2)" in messaggio
+    assert "HTTP 200 da https://auth.portaleargo.it/oauth2/auth" in messaggio
+    assert "«Manutenzione»" in messaggio
+    # La query (con challenge e verifier) non finisce nel messaggio.
+    assert "login_verifier" not in messaggio
+
+
+# --------------------------------------------------------------------- #
+# Pagina di consenso che risponde 200 invece di un redirect (issue #3)  #
+# --------------------------------------------------------------------- #
+URL_CONSENT_PAGE = "https://www.portaleargo.it/auth/sso/consent/?consent_challenge=c1"
+URL_CONSENT_POST = "https://www.portaleargo.it/auth/sso/consent/"
+
+
+def _mock_consenso(pagina: str) -> dict[str, respx.Route]:
+    rotte = _mock_flusso_sso()
+    rotte["r2"].mock(return_value=_redirect(URL_CONSENT_PAGE))
+    rotte["consent"] = respx.get(URL_CONSENT_PAGE).mock(
+        return_value=httpx.Response(
+            200,
+            text=pagina,
+            headers=[
+                ("content-type", "text/html"),
+                ("set-cookie", "consent_csrf=def; Path=/; HttpOnly"),
+            ],
+        )
+    )
+    rotte["consent_post"] = respx.post(URL_CONSENT_POST).mock(return_value=_redirect(URL_4))
+    return rotte
+
+
+def _form_inviato(rotta: respx.Route) -> dict[str, list[str]]:
+    from urllib.parse import parse_qs
+
+    return parse_qs(rotta.calls.last.request.content.decode())
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_consenso_con_form_viene_accettato():
+    pagina = """
+    <html><head><title>Autorizza</title></head><body>
+    <form action="/auth/sso/consent/" method="post">
+      <input type="hidden" name="challenge" value="c1">
+      <input type="hidden" name="_csrf" value="tok&amp;en">
+      <input type="checkbox" name="grant_scope" value="openid" checked>
+      <input type="checkbox" name="grant_scope" value="argo">
+      <input type="checkbox" name="remember" value="true">
+      <button type="submit" name="submit" value="deny">Rifiuta</button>
+      <button type="submit" name="submit" value="accept">Accetta</button>
+    </form></body></html>
+    """
+    rotte = _mock_consenso(pagina)
+    _mock_token()
+
+    async with httpx.AsyncClient() as http:
+        sessione = await Autenticatore(CREDENZIALI).login(http)
+
+    assert sessione.access_token == "acc-1"
+    form = _form_inviato(rotte["consent_post"])
+    assert form["challenge"] == ["c1"]
+    assert form["_csrf"] == ["tok&en"]
+    assert form["grant_scope"] == ["openid", "argo"]
+    assert form["submit"] == ["accept"]
+    assert "remember" not in form  # casella non spuntata: il browser non la manda
+    # Il POST del consenso porta i cookie di www, come farebbe il browser.
+    assert "consent_csrf=def" in rotte["consent_post"].calls.last.request.headers["cookie"]
+    assert rotte["consent_post"].calls.last.request.headers["content-type"] == (
+        "application/x-www-form-urlencoded"
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_consenso_senza_form_accetta_gli_scope_richiesti():
+    rotte = _mock_consenso("<html><body><div id='app'></div></body></html>")
+    _mock_token()
+
+    async with httpx.AsyncClient() as http:
+        sessione = await Autenticatore(CREDENZIALI).login(http)
+
+    assert sessione.access_token == "acc-1"
+    form = _form_inviato(rotte["consent_post"])
+    assert form["challenge"] == ["c1"]
+    assert form["grant_scope"] == list(CONFIG.scopes)
+    assert form["consent"] == ["Accetta"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_pagina_accesso_completato_con_link_continua():
+    pagina = (
+        "<h1>Accesso completato</h1>"
+        f'<a class="btn" href="{CONFIG.redirect_uri}?code=il-code&amp;state=x">Continua</a>'
+    )
+    rotte = _mock_consenso(pagina)
+    token = _mock_token()
+
+    async with httpx.AsyncClient() as http:
+        await Autenticatore(CREDENZIALI).login(http)
+
+    assert not rotte["consent_post"].called
+    assert "code=il-code" in token.calls.last.request.content.decode()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_pagina_intermedia_con_redirect_javascript():
+    pagina = (
+        "<script>window.location.href = "
+        "'https:\\/\\/auth.portaleargo.it\\/oauth2\\/auth?consent_verifier=v2';</script>"
+    )
+    rotte = _mock_consenso(pagina)
+    _mock_token()
+
+    async with httpx.AsyncClient() as http:
+        sessione = await Autenticatore(CREDENZIALI).login(http)
+
+    assert sessione.access_token == "acc-1"
+    assert rotte["r4"].called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_pagina_intermedia_con_meta_refresh():
+    pagina = '<meta http-equiv="refresh" content="0; url=/auth/sso/fine?x=1">'
+    rotte = _mock_consenso(pagina)
+    fine = respx.get("https://www.portaleargo.it/auth/sso/fine?x=1").mock(
+        return_value=_redirect(URL_4)
+    )
+    _mock_token()
+
+    async with httpx.AsyncClient() as http:
+        await Autenticatore(CREDENZIALI).login(http)
+
+    assert fine.called
+    assert rotte["r4"].called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_ritorno_al_form_di_login_non_viene_inviato():
+    pagina = """
+    <title>Accedi</title>
+    <form method="post"><input name="username"><input type="password" name="password">
+    <button type="submit">Entra</button></form>
+    """
+    rotte = _mock_flusso_sso()
+    rotte["r2"].mock(return_value=httpx.Response(200, text=pagina))
+
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(AuthError, match="«Accedi»"):
+            await Autenticatore(CREDENZIALI).login(http)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_errore_oauth_nel_redirect_finale():
+    rotte = _mock_flusso_sso()
+    rotte["r4"].mock(
+        return_value=_redirect(f"{CONFIG.redirect_uri}?error=access_denied&error_description=no")
+    )
+
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(AuthError, match="access_denied no"):
+            await Autenticatore(CREDENZIALI).login(http)
 
 
 @respx.mock
