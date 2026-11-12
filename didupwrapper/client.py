@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Coroutine
+import logging
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -38,7 +39,7 @@ from .endpoints import (
     RegistroEndpoint,
     VotiEndpoint,
 )
-from .exceptions import DiDUPError, from_response
+from .exceptions import DiDUPError, NetworkError, from_response, from_transport_error
 from .models import (
     ComunicazioneBacheca,
     DashboardResponse,
@@ -60,6 +61,17 @@ if TYPE_CHECKING:
 __all__ = ["DiDUPClient", "DiDUPClientSync", "Profilo"]
 
 T = TypeVar("T")
+
+logger = logging.getLogger("didupwrapper.client")
+
+# I server Argo a volte sono lenti (la dashboard "dal 2000" è grossa): meglio
+# un timeout largo che un errore a vuoto.
+_TIMEOUT_DEFAULT = 60.0
+# Errori del server per cui ha senso riprovare: il gateway davanti all'API
+# risponde così quando il backend è sovraccarico o si sta riavviando.
+_STATUS_RITENTABILI = frozenset({502, 503, 504})
+# Attesa prima del primo nuovo tentativo; raddoppia a ogni giro (1s, 2s, 4s...).
+_ATTESA_RITENTATIVO = 1.0
 
 _LOGIN_PATH = "login"
 _PROFILO_PATH = "profilo"
@@ -112,6 +124,14 @@ class DiDUPClient:
 
         async with DiDUPClient("SC12345", "mario.rossi", "password") as didup:
             voti = await didup.get_voti()
+
+    ``timeout`` (secondi, o un ``httpx.Timeout``) vale per ogni richiesta,
+    login compreso. Se il server non risponde in tempo, non è raggiungibile o
+    risponde 502/503/504, la richiesta viene ripetuta fino a ``tentativi``
+    volte, aspettando un po' di più ogni volta; se fallisce anche l'ultima
+    arriva un :class:`~didupwrapper.exceptions.NetworkError` (o un
+    :class:`~didupwrapper.exceptions.RequestTimeoutError`). Con
+    ``tentativi=0`` non si riprova mai.
     """
 
     def __init__(
@@ -121,12 +141,16 @@ class DiDUPClient:
         password: str | None = None,
         *,
         config: ArgoConfig | None = None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = _TIMEOUT_DEFAULT,
+        tentativi: int = 2,
         http_client: httpx.AsyncClient | None = None,
         access_token: str | None = None,
         version: str | None = None,
         auto_versione: bool = False,
     ) -> None:
+        if tentativi < 0:
+            raise ValueError("tentativi deve essere >= 0")
+        self._tentativi = tentativi
         self._config = config or ArgoConfig()
         if version is not None:
             self._config = replace(self._config, version=version)
@@ -139,7 +163,7 @@ class DiDUPClient:
             else None
         )
         sessione = SessioneToken(access_token=access_token) if access_token else None
-        self._auth = Autenticatore(credenziali, self._config, sessione=sessione)
+        self._auth = Autenticatore(credenziali, self._config, sessione=sessione, timeout=timeout)
 
         self._proprio_http = http_client is None
         self._http = http_client or httpx.AsyncClient(
@@ -186,7 +210,7 @@ class DiDUPClient:
     async def login(self) -> None:
         """Fa il login completo (OAuth + login dell'app). Se sei già dentro non fa nulla."""
         await self._assicura_versione()
-        await self._auth.assicura_sessione(self._http)
+        await self._con_ritentativi(lambda: self._auth.assicura_sessione(self._http))
         if self._login_data is None:
             await self._login_applicativo()
 
@@ -338,12 +362,51 @@ class DiDUPClient:
             # Il token OAuth è scaduto (o non c'è ancora): ne prendiamo uno nuovo.
             # Il vecchio x-auth-token era legato alla sessione precedente, quindi
             # rifacciamo anche il login dell'app.
-            await self._auth.login(self._http)
+            await self._con_ritentativi(lambda: self._auth.login(self._http))
             if self._login_data is not None and path != _LOGIN_PATH:
                 self._login_data = None
                 await self._login_applicativo()
-        headers = {**self._headers(), **kwargs.pop("headers", {})}
-        risposta = await self._http.request(method, path, headers=headers, **kwargs)
+        extra_headers = kwargs.pop("headers", {})
+        return await self._con_ritentativi(
+            lambda: self._invia(method, path, extra_headers, kwargs)
+        )
+
+    async def _con_ritentativi(self, operazione: Callable[[], Awaitable[T]]) -> T:
+        """Esegue ``operazione`` e la ripete se fallisce per un problema passeggero.
+
+        Si riprova solo per errori di rete, timeout e 502/503/504. Le POST che
+        facciamo (login e dashboard) leggono soltanto, quindi ripeterle è sicuro.
+        """
+        tentativo = 0
+        while True:
+            try:
+                return await operazione()
+            except DiDUPError as exc:
+                ritentabile = (
+                    isinstance(exc, NetworkError) or exc.status_code in _STATUS_RITENTABILI
+                )
+                if not ritentabile or tentativo >= self._tentativi:
+                    raise
+                attesa = _ATTESA_RITENTATIVO * 2**tentativo
+                tentativo += 1
+                logger.warning(
+                    "%s: nuovo tentativo %d di %d tra %.0fs",
+                    exc,
+                    tentativo,
+                    self._tentativi,
+                    attesa,
+                )
+                await asyncio.sleep(attesa)
+
+    async def _invia(
+        self, method: str, path: str, extra_headers: dict[str, str], kwargs: dict[str, Any]
+    ) -> Any:
+        """Una singola richiesta all'API, senza nuovi tentativi."""
+        headers = {**self._headers(), **extra_headers}
+        try:
+            risposta = await self._http.request(method, path, headers=headers, **kwargs)
+        except httpx.TransportError as exc:
+            raise from_transport_error(exc) from exc
         if risposta.is_error:
             raise from_response(risposta)
         if not risposta.content:

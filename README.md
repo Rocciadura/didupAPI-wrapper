@@ -147,6 +147,28 @@ parola del nominativo; se il nome corrisponde a nessuno o a più profili solleva
 profilo scelto resta attivo anche quando il client rifà il login per una
 sessione scaduta.
 
+## Timeout e server lenti
+
+I server Argo a volte ci mettono parecchio a rispondere. Il client aspetta fino
+a **60 secondi** per richiesta (login compreso) e, se il server non risponde in
+tempo, non è raggiungibile o risponde `502`/`503`/`504`, riprova da solo fino a
+**2 volte**, aspettando 1 e poi 2 secondi. Puoi cambiare entrambi i valori:
+
+```python
+DiDUPClient("SC12345", "user", "pwd", timeout=90, tentativi=4)
+
+# Timeout diversi per connessione e lettura
+import httpx
+DiDUPClient("SC12345", "user", "pwd", timeout=httpx.Timeout(90, connect=10))
+
+# Nessun nuovo tentativo
+DiDUPClient("SC12345", "user", "pwd", tentativi=0)
+```
+
+Se anche l'ultimo tentativo fallisce arriva un `RequestTimeoutError` (o un
+`NetworkError` per gli altri problemi di rete), che come tutte le eccezioni della
+libreria deriva da `DiDUPError`.
+
 ## Riferimento API
 
 ### Metodi del client
@@ -202,16 +224,20 @@ Tutte le eccezioni derivano da `DiDUPError`, che espone `status_code`,
 | `AuthError` | Credenziali errate, sessione scaduta (HTTP 401/403) |
 | `RateLimitError` | Troppe richieste (HTTP 429); vedi `retry_after` |
 | `NotFoundError` | Risorsa inesistente (HTTP 404) |
+| `RequestTimeoutError` | Il server non ha risposto entro il `timeout`, anche dopo i nuovi tentativi |
+| `NetworkError` | Server irraggiungibile o connessione interrotta (include `RequestTimeoutError`) |
 | `DiDUPError` | Qualsiasi altro errore, incluso il `410` per versione superata |
 
 ```python
-from didupwrapper import AuthError, DiDUPError
+from didupwrapper import AuthError, DiDUPError, NetworkError
 
 try:
     async with DiDUPClient(scuola, username, password) as didup:
         voti = await didup.get_voti()
 except AuthError:
     print("Credenziali non valide")
+except NetworkError:
+    print("Argo non risponde, riprova più tardi")
 except DiDUPError as errore:
     print("Errore:", errore)
 ```

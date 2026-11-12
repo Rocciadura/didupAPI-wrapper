@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 import httpx
 
-from .exceptions import AuthError, from_response
+from .exceptions import AuthError, from_response, from_transport_error
 
 __all__ = [
     "APP_BUNDLE_ID",
@@ -151,7 +151,11 @@ class SessioneToken:
 
 
 class Autenticatore:
-    """Fa il login OAuth2/PKCE e si ricorda la sessione ottenuta."""
+    """Fa il login OAuth2/PKCE e si ricorda la sessione ottenuta.
+
+    ``timeout`` vale per i passaggi sul portale SSO; lo scambio del ``code``
+    usa invece il client HTTP che gli viene passato.
+    """
 
     def __init__(
         self,
@@ -159,10 +163,12 @@ class Autenticatore:
         config: ArgoConfig | None = None,
         *,
         sessione: SessioneToken | None = None,
+        timeout: float | httpx.Timeout = 60.0,
     ) -> None:
         self.credenziali = credenziali
         self.config = config or ArgoConfig()
         self.sessione = sessione
+        self.timeout = timeout
 
     @property
     def autenticato(self) -> bool:
@@ -228,7 +234,7 @@ class Autenticatore:
         assert self.credenziali is not None
         cookies = _CookieJar()
 
-        async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as c:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=self.timeout) as c:
 
             async def passo(
                 n: int, method: str, url: str, **kwargs: Any
@@ -237,7 +243,10 @@ class Autenticatore:
                 cookie = cookies.header_per(url)
                 if cookie:
                     headers["cookie"] = cookie
-                r = await c.request(method, url, headers=headers, **kwargs)
+                try:
+                    r = await c.request(method, url, headers=headers, **kwargs)
+                except httpx.TransportError as exc:
+                    raise from_transport_error(exc, url=_senza_query(url)) from exc
                 c.cookies.clear()  # i cookie li gestiamo noi, vedi sopra
                 cookies.raccogli(r)
                 logger.debug(
@@ -336,17 +345,20 @@ class Autenticatore:
         self, http: httpx.AsyncClient, link: LoginLink, code: str
     ) -> SessioneToken:
         """Scambia il ``code`` con l'access token vero e proprio."""
-        risposta = await http.post(
-            self.config.oauth_token_url,
-            data={
-                "code": code,
-                "grant_type": "authorization_code",
-                "redirect_uri": self.config.redirect_uri,
-                "code_verifier": link.code_verifier,
-                "client_id": self.config.client_id,
-            },
-            headers={"content-type": "application/x-www-form-urlencoded"},
-        )
+        try:
+            risposta = await http.post(
+                self.config.oauth_token_url,
+                data={
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": self.config.redirect_uri,
+                    "code_verifier": link.code_verifier,
+                    "client_id": self.config.client_id,
+                },
+                headers={"content-type": "application/x-www-form-urlencoded"},
+            )
+        except httpx.TransportError as exc:
+            raise from_transport_error(exc) from exc
         if risposta.is_error:
             raise from_response(risposta)
         try:

@@ -14,9 +14,12 @@ import httpx
 __all__ = [
     "AuthError",
     "DiDUPError",
+    "NetworkError",
     "NotFoundError",
     "RateLimitError",
+    "RequestTimeoutError",
     "from_response",
+    "from_transport_error",
 ]
 
 
@@ -64,6 +67,42 @@ class RateLimitError(DiDUPError):
 
 class NotFoundError(DiDUPError):
     """L'endpoint o la risorsa non esiste (HTTP 404)."""
+
+
+class NetworkError(DiDUPError):
+    """Il server non è raggiungibile o ha chiuso la connessione a metà.
+
+    Non arriva nessuna risposta HTTP, quindi ``status_code`` è ``None``.
+    """
+
+
+class RequestTimeoutError(NetworkError):
+    """Il server non ha risposto entro il ``timeout`` impostato."""
+
+
+def from_transport_error(
+    exc: httpx.TransportError, *, url: str | None = None
+) -> NetworkError:
+    """Trasforma un errore di rete di httpx nell'eccezione della libreria.
+
+    ``url`` sostituisce quello della richiesta, per esempio per non mettere
+    nel messaggio la query string dei passaggi OAuth.
+    """
+    if url is None:
+        try:
+            url = str(exc.request.url)
+        except RuntimeError:  # httpx non sempre conosce la richiesta
+            url = None
+    tipo = type(exc).__name__
+    if isinstance(exc, httpx.TimeoutException):
+        return RequestTimeoutError(
+            f"Il server DiDUP non ha risposto in tempo ({tipo})", request_url=url
+        )
+    dettaglio = str(exc).strip()
+    return NetworkError(
+        f"Errore di rete verso DiDUP ({tipo}{': ' + dettaglio if dettaglio else ''})",
+        request_url=url,
+    )
 
 
 def from_response(response: httpx.Response) -> DiDUPError:

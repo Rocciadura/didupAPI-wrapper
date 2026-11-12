@@ -35,8 +35,10 @@ from .client import DiDUPClient, DiDUPClientSync, Profilo
 from .exceptions import (
     AuthError,
     DiDUPError,
+    NetworkError,
     NotFoundError,
     RateLimitError,
+    RequestTimeoutError,
 )
 from .models import (
     Allegato,
@@ -78,6 +80,8 @@ __all__ = [  # noqa: RUF022 - raggruppato per argomento
     "AuthError",
     "RateLimitError",
     "NotFoundError",
+    "NetworkError",
+    "RequestTimeoutError",
     # modelli
     "DashboardResponse",
     "Voto",

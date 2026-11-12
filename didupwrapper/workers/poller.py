@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Callable, Hashable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
+from ..exceptions import NetworkError
 from ..models import (
     ComunicazioneBacheca,
     EventoAppello,
@@ -122,7 +123,10 @@ class DashboardPoller:
         while not self._stop.is_set():
             try:
                 await self.tick()
-            except Exception:  # un errore di rete non deve fermare tutto
+            except NetworkError as exc:
+                # Server lento o irraggiungibile: capita, si riprova al prossimo giro.
+                logger.warning("Giro di polling saltato: %s", exc)
+            except Exception:  # nessun errore deve fermare tutto
                 logger.exception("Errore durante il ciclo di polling")
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self._intervallo)
